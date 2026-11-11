@@ -1,3 +1,4 @@
+import os
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -6,13 +7,19 @@ from query_engine import generate_structured, validate_sql, execute_sql, transcr
 from sessions import get_session
 
 app = FastAPI()
+FRONTEND_ORIGIN = os.getenv(
+    "FRONTEND_ORIGIN",
+    "http://localhost:3000",
+)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[FRONTEND_ORIGIN],
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
 
 class Message(BaseModel):
     text: str
