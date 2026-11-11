@@ -1,7 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from db import get_schema_summary
+from db import get_schema_context ,get_schema_summary
 from query_engine import generate_structured, validate_sql, execute_sql, transcribe_audio
 from sessions import get_session
 
@@ -21,7 +21,7 @@ class Message(BaseModel):
 
 def run_pipeline(text: str, session_id: str, transcript: str | None = None) -> dict:
     session = get_session(session_id)
-    schema = get_schema_summary()
+    schema = get_schema_context()
     extra = {"transcript": transcript} if transcript else {}
 
     # If we asked a question last turn, this message is the answer: merge it back in.

@@ -15,6 +15,10 @@ test_queries = [
     )
     SELECT * FROM recent;
     """,
+    "SELECT LOWER(status) FROM orders;",
+    "SELECT COUNT(*) FROM orders;",
+    "SELECT SUM(unit_price) FROM products;",
+    "SELECT CURRENT_DATE;",
 
     # Should be blocked
     "SELECT * FROM pg_catalog.pg_tables;",
@@ -31,6 +35,12 @@ test_queries = [
     )
     SELECT * FROM deleted;
     """,
+    "SELECT pg_sleep(10);",
+    "SELECT set_config('x', 'y', false);",
+    "SELECT pg_read_file('/etc/passwd');",
+    "SELECT dblink_connect('remote_connection');",
+    "SELECT pg_terminate_backend(123);",
+    "SELECT nextval('orders_order_id_seq');",
 ]
 
 

@@ -45,6 +45,9 @@ client = genai.Client(
 )
 
 engine = create_engine(os.getenv("DATABASE_URL"))
+MAX_RESULT_ROWS = int(
+    os.getenv("MAX_RESULT_ROWS", "100")
+)
 
 
 # -----------------------------------------------------------------------------
@@ -305,10 +308,45 @@ def call_gemini(
 # -----------------------------------------------------------------------------
 # Prompt construction
 # -----------------------------------------------------------------------------
+BUSINESS_RULES = """
+Business semantics:
 
+- Revenue means:
+  SUM(order_items.quantity * order_items.unit_price)
+
+- Exclude cancelled orders from revenue and sales calculations
+  unless the user explicitly asks to include cancelled orders.
+
+- Treat order statuses case-insensitively.
+  For example, 'Cancelled', 'cancelled', and 'CANCELLED'
+  refer to the same status.
+
+- Use these canonical relationships:
+  - order_items.order_id = orders.order_id
+  - order_items.product_id = products.product_id
+  - orders.customer_id = customers.customer_id
+  - customers.region_id = regions.region_id
+
+- When joining orders to order_items, count DISTINCT orders.order_id
+  when the user asks for number of orders.
+
+- Do not calculate revenue by summing unit_price alone.
+  Always multiply quantity by unit_price.
+
+- Interpret:
+  - 'revenue' and 'sales' as monetary value
+  - 'orders' as order count
+  - 'customers' as customer count or customer records,
+    depending on the request
+  - 'products' as product records or product sales,
+    depending on the request
+
+- Use order_date for order-time analysis.
+- Use signup_date for customer acquisition analysis.
+"""
 def build_prompt(
     request: str,
-    schema: dict,
+    schema: str | dict,
     history: list,
     allow_clarification: bool,
 ) -> str:
@@ -316,7 +354,10 @@ def build_prompt(
     Build the prompt used to convert a natural-language request into SQL.
     """
 
-    schema_text = "\n".join(
+    if isinstance(schema, str):
+        schema_text = schema
+    else:
+        schema_text = "\n".join(
         f"- {table}({', '.join(columns)})"
         for table, columns in schema.items()
     )
@@ -348,6 +389,8 @@ Hinglish or Tanglish. Interpret the meaning, not only the exact words.
 
 Schema:
 {schema_text}
+Business rules:
+{BUSINESS_RULES}
 
 Recent conversation:
 {history_text}
@@ -358,6 +401,14 @@ Rules:
 - Use only the tables and columns listed above.
 - If the request refers to earlier results, modify the most recent SQL.
 - {clarification_rule}
+- Treat observed values as the source of truth.
+- Do not assume the user's casing matches the database casing.
+- For text filters, prefer case-insensitive comparisons such as:
+  LOWER(column) = LOWER('value')
+  or ILIKE.
+- Use the observed database values when choosing status, category,
+  and region filters.
+- Do not invent values that are not present in the schema context.
 
 Respond with JSON only, using exactly one of these shapes:
 
@@ -482,6 +533,45 @@ ALLOWED_SCHEMAS = {
     "public",
 }
 
+DANGEROUS_FUNCTION_NAMES = {
+    # Delays and resource exhaustion
+    "pg_sleep",
+    "pg_sleep_for",
+    "pg_sleep_until",
+
+    # Runtime/configuration mutation or inspection
+    "set_config",
+    "current_setting",
+
+    # File-system access
+    "pg_read_file",
+    "pg_read_binary_file",
+    "pg_ls_dir",
+    "pg_stat_file",
+    "pg_logdir_ls",
+
+    # External connections
+    "dblink_connect",
+    "dblink_connect_u",
+    "dblink_exec",
+    "dblink_send_query",
+
+    # Backend/process control
+    "pg_cancel_backend",
+    "pg_terminate_backend",
+
+    # Locks and notifications
+    "pg_advisory_lock",
+    "pg_advisory_xact_lock",
+    "pg_advisory_unlock",
+    "pg_advisory_unlock_all",
+    "pg_notify",
+
+    # Sequence mutation
+    "nextval",
+    "setval",
+}
+
 def validate_sql(sql: str) -> tuple[bool, str]:
     """
     Validate that SQL is:
@@ -545,6 +635,22 @@ def validate_sql(sql: str) -> tuple[bool, str]:
         for cte in statement.find_all(exp.CTE)
     }
 
+    # Reject dangerous functions even when they appear inside
+    # an otherwise valid SELECT statement.
+    for node in statement.find_all(exp.Func):
+        function_name = getattr(node, "name", None)
+
+        if not function_name:
+            function_name = node.sql_name()
+
+        function_name = function_name.lower()
+
+        if function_name in DANGEROUS_FUNCTION_NAMES:
+            return (
+                False,
+                f"Rejected dangerous function: {function_name}",
+            )
+
     for table in statement.find_all(exp.Table):
         table_name = table.name.lower()
         schema_name = (table.db or "").lower()
@@ -577,11 +683,28 @@ def validate_sql(sql: str) -> tuple[bool, str]:
 
 def execute_sql(sql: str):
     """
-    Execute validated SQL and convert rows into dictionaries.
+    Execute a validated query with a hard server-side row limit.
+
+    The generated SQL is wrapped as a subquery so the limit applies
+    even when Gemini forgets to include LIMIT itself.
+    """
+
+    clean_sql = sql.strip().rstrip(";").strip()
+
+    limited_sql = f"""
+        SELECT *
+        FROM ({clean_sql}) AS voxql_limited_result
+        LIMIT :max_rows
     """
 
     with engine.connect() as connection:
-        result = connection.execute(text(sql))
+        result = connection.execute(
+            text(limited_sql),
+            {
+                "max_rows": MAX_RESULT_ROWS,
+            },
+        )
+
         return [
             dict(row._mapping)
             for row in result
