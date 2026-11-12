@@ -2,7 +2,7 @@ fastapi
 uvicorn
 sqlalchemy
 sqlglot
-psycopg2-binary
+psycopg[binary]
 python-dotenv
 google-genai
 faker
